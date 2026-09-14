@@ -277,7 +277,6 @@ def fit(model, lat, S, K=4, even=False, L=5e-5, n_sites=None, sigma2=None,
 
 def to_modelg(f):
     """Model G(+) fit -> (a, b) with fit standard deviations.
-
     returns : dict(a, b, sd_a, sd_b[, a1, sd_a1])
     """
     if f.model not in ("mg", "mg+"):
@@ -353,34 +352,75 @@ def make_fit(model, theta=None, alpha_k=None, lat=None, K=None, even=False,
 
 
 
-def bootstrap(model, lat, S, B=1000, seed=None, lat_out=None, **kw):
-    """Bootstrap resample localities and refit.
+_PARAM_NAMES = {
+    "mg":  np.array(["a", "b"], dtype=object),
+    "mg+": np.array(["a", "b", "d"], dtype=object),
+}
 
-    Returns (B, 5) alpha_k draws on the common axis.
-    lat_out : optional (M,) deg -- also returns (alpha, theta, curves).
-    """
+
+@dataclass
+class BootResult:
+    model: str
+    param_names: np.ndarray
+    params: np.ndarray
+    alpha_k: np.ndarray
+    lat: np.ndarray
+    S_pred: np.ndarray
+
+    @property
+    def B(self):
+        return self.params.shape[0]
+
+    def summary(self, ci=95):
+        lo, hi = (100 - ci) / 2, (100 + ci) / 2
+        return dict(
+            param_median=np.median(self.params, axis=0),
+            param_ci=np.percentile(self.params, [lo, hi], axis=0).T,
+            S_median=np.median(self.S_pred, axis=0),
+            S_ci=np.percentile(self.S_pred, [lo, hi], axis=0).T,
+        )
+
+
+def _readout(fb):
+    if fb.model in ("mg", "mg+"):
+        g = to_modelg(fb)
+        row = [g["a"], g["b"]]
+        if fb.model == "mg+" and "a1" in g:
+            row.append(g["a1"])
+        return row
+    return fb.alpha_k.tolist()
+
+
+def bootstrap(model, lat, S, B=1000, seed=None, lat_out=None, **kw):
     lat = np.atleast_1d(np.asarray(lat, dtype=float))
     S = np.atleast_1d(np.asarray(S, dtype=float))
     N = lat.size
     n = kw.pop("n_sites", None)
     n = None if n is None else np.broadcast_to(np.asarray(n, dtype=float), (N,))
     kw.setdefault("sigma2", sigma2_hat(S, n))
+    if lat_out is None:
+        lat_out = np.linspace(-90, 90, 37)
+    lat_out = np.atleast_1d(np.asarray(lat_out, dtype=float))
     rng = np.random.default_rng(seed)
-    out = np.empty((B, K_OUT + 1))
-    theta_list = []
-    curves = None if lat_out is None else np.empty((B, np.size(lat_out)))
 
-    def keep(b, fb):
-        out[b] = fb.alpha_k
-        if lat_out is not None:
-            theta_list.append(fb.theta)
-            curves[b] = fb.predict(lat_out)
+    alpha_draws = np.empty((B, K_OUT + 1))
+    param_draws = []
+    S_draws = np.empty((B, lat_out.size))
 
     for b in range(B):
         i = rng.integers(0, N, N)
-        keep(b, fit(model, lat[i], S[i],
-                    n_sites=None if n is None else n[i], **kw))
-    return out if lat_out is None else (out, np.array(theta_list), curves)
+        fb = fit(model, lat[i], S[i],
+                 n_sites=None if n is None else n[i], **kw)
+        alpha_draws[b] = fb.alpha_k
+        param_draws.append(_readout(fb))
+        S_draws[b] = fb.predict(lat_out)
+
+    names = _PARAM_NAMES.get(model,
+                np.array([f"a{k}" for k in range(K_OUT + 1)], dtype=object))
+
+    return BootResult(model=model, param_names=names,
+                      params=np.array(param_draws), alpha_k=alpha_draws,
+                      lat=lat_out, S_pred=S_draws)
 
 
 
